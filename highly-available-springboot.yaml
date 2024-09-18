@@ -38,9 +38,6 @@ Parameters:
     Default: t3a.small
   Username:
     Type: String
-  # NatGatewayId:
-  #   Type: String
-  #   Default: nat-0d8dd437dacc1e59a
   DomainName:
     Type: String
 
