@@ -1,0 +1,365 @@
+Parameters:
+
+  AccountName:
+    Type: String
+    Default: cloudacademy
+  AccountCode:
+    Type: String
+    Default: a
+  RegionCode:
+    Type: String
+    Default: ew1
+  Environment:
+    Type: String
+    Default: training
+  Project:
+    Type: String
+    Default: cloudacademy
+  Application:
+    Type: String
+    Default: springboot-todo
+  SsmPublicHostedZoneIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::Route53::HostedZone::Id>
+    Default: /cloudacademy/cfn/route53/hostedzone/public/id
+  SsmVpcIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::VPC::Id>
+    Default: /cloudacademy/cfn/app/vpc/id
+  SsmSubnetsKey:
+    Type: AWS::SSM::Parameter::Value<List<AWS::EC2::Subnet::Id>>
+    Default: /cloudacademy/cfn/app/vpc/subnet/public/ids
+  PrivateSubnetKey:
+    Type: AWS::SSM::Parameter::Value<List<AWS::EC2::Subnet::Id>>
+    Default: /cloudacademy/cfn/app/vpc/subnet/private/ids
+  SsmAppAmiIdKey:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  AppInstanceType:
+    Type: String
+    Default: t3a.small
+  Username:
+    Type: String
+  # NatGatewayId:
+  #   Type: String
+  #   Default: nat-0d8dd437dacc1e59a
+  DomainName:
+    Type: String
+
+Resources:
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Project}-${Application}-${Username}-ec2-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyName: !Sub ${Project}-${Application}-ec2-role-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: codecommit:GitPull
+                Resource: !Sub arn:aws:codecommit:eu-west-1:${AWS::AccountId}:ansible-playbook-springboot-*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::a-ew1-cloudacademy-assets/*
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Project}-${Application}-${Username}-instance-profile
+      Path: /
+      Roles:
+        - !Ref AppRole
+
+  # InternetGateway:
+  #   Type: AWS::EC2::InternetGateway
+
+  # VPCGatewayAttachment:
+  #   Type: AWS::EC2::VPCGatewayAttachment
+  #   Properties:
+  #     VpcId: !Ref SsmVpcIdKey
+  #     InternetGatewayId: !Ref InternetGateway
+
+  # S3VPCEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref SsmVpcIdKey
+  #     ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+  #     RouteTableIds:
+  #       - !Ref PrivateRouteTable
+  #     VpcEndpointType: Gateway
+
+  # PublicRoute:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId: !Ref PrivateRouteTable
+  #     DestinationCidrBlock: 0.0.0.0/0
+  #     GatewayId: !Ref NatGatewayId
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SsmVpcIdKey
+      Tags:
+        - Key: Name
+          Value: !Sub ${Project}-${Application}-${Username}-private-route-table
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AccountCode}-${RegionCode}-${Project}-${Application}-${Username}
+      GroupDescription: Allows access to the App
+      VpcId: !Ref SsmVpcIdKey
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          Description: Allow traffic on port 8080
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      Tags:
+        - Key: Name
+          Value: !Sub ${AccountCode}-${RegionCode}-${Project}-${Application}-${Username}
+
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt AppInstanceProfile.Arn
+        ImageId: !Ref SsmAppAmiIdKey
+        InstanceType: !Ref AppInstanceType
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Select
+              - 0
+              - !Ref PrivateSubnetKey
+            AssociatePublicIpAddress: false
+            Groups:
+              - !Ref AppSecurityGroup
+        # SecurityGroupIds:
+        #   - !Ref AppSecurityGroup
+        TagSpecifications:
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub ${AccountCode}-${RegionCode}-${Project}-${Application}-${Username}-volume
+              - Key: Application
+                Value: !Ref Application
+              - Key: Environment
+                Value: !Ref Environment
+        UserData: !Base64
+          Fn::Sub: |
+            #!/bin/bash -xe
+            useradd -m cloudacademy
+            passwd -d cloudacademy
+            mkdir /var/log/cloudacademy
+            chown -R cloudacademy:cloudacademy /var/log/cloudacademy
+            mkdir /usr/bin/app && cd /usr/bin/app
+            timedatectl set-timezone Europe/Luxembourg
+            dnf update -y
+            aws s3 cp s3://a-ew1-cloudacademy-assets/training/apps/springboot-sample.jar .
+            aws s3 cp s3://a-ew1-cloudacademy-assets/training/apps/springboot-sample.logback.xml .
+            dnf install -y java-11-amazon-corretto amazon-cloudwatch-agent
+            cp springboot-sample.logback.xml logback.xml
+            cd /opt/aws/amazon-cloudwatch-agent/etc
+            tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/cloud-init-output.log",
+                        "log_group_name": "/cloudacademy/springboot-sample/cloud-init-output.log",
+                        "log_stream_name": "cloud-init-output.log"
+                      },
+                      {
+                        "file_path": "/var/log/cloudacademy/spring.log",
+                        "log_group_name": "/cloudacademy/springboot-sample/spring.log",
+                        "log_stream_name": "spring.log"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+            tee /etc/systemd/system/springboot-sample.service << 'EOF'
+            [Unit]
+            Description=springboot-sample
+            After=syslog.target network.target
+            [Service]
+            User=cloudacademy
+            Group=cloudacademy
+            ExecStart=/usr/bin/java -jar /usr/bin/app/springboot-sample.jar --logging.config=/usr/bin/app/springboot-sample.logback.xml
+            ExecStop=/bin/kill -15 $MAINPID
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl start springboot-sample.service
+
+  # AppInstance:
+  #   Type: AWS::EC2::Instance
+  #   Properties:
+  #     LaunchTemplate:
+  #       LaunchTemplateId: !Ref AppLaunchTemplate
+  #       Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+  #     NetworkInterfaces:
+  #       - DeviceIndex: 0
+  #         SubnetId: !Select
+  #           - 0
+  #           - !Ref SsmSubnetsKey
+  #         AssociatePublicIpAddress: false
+  #         GroupSet:
+  #           - !Ref AppSecurityGroup
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref SsmVpcIdKey
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Name: !Sub ${Application}-${Username}-tg
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref SsmVpcIdKey
+      GroupDescription: Security group for the Load Balancer
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: !Ref SsmSubnetsKey
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+
+  AppCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref SsmPublicHostedZoneIdKey
+      Tags:
+        - Key: Name
+          Value: !Sub ${AccountCode}-${RegionCode}-${Project}-${Application}-${Username}-certificate
+
+  LoadBalancerListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  LoadBalancerListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref AppCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetKey
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+        SuspenProcesses:
+          - HealthCheck
+  
+  AutoScalingGroupScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        TargetValue: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+
+  DnsRecords:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref SsmPublicHostedZoneIdKey
+      Name: !Sub ${Username}.cloudacademy.spikeseed.ninja
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
